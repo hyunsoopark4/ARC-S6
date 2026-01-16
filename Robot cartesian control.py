@@ -550,16 +550,17 @@ class ROBOT_SEND():
             print(f"[INFO] Command sent: {command}")
         except Exception as e:
             print(f"[ERROR] send_command failed: {e}")
-            
+
+
 if __name__ == "__main__":
-    print("=== ROBOT FAST RESPONSE CONTROL ===")
+    print("=== ROBOT SMART CONTROL (MANUAL MODE ADDED) ===")
 
     robot_send = ROBOT_SEND()
     
     global current_real_pose
     current_real_pose = None
 
-    # --- [쓰레드 설정은 동일] ---
+    # --- [쓰레드 설정] ---
     def recv_status_thread():
         while True:
             try:
@@ -584,60 +585,110 @@ if __name__ == "__main__":
     time.sleep(3)
 
     try:
+        # 1. 전원 및 브레이크 설정
+        print("\n[STEP 1] 전원 상태 확인")
         if robot_send.recv.is_robot_power_on() == False:
             robot_send.robot_power_on()
-            time.sleep(5)
-            robot_send.robot_brake_release()
-            time.sleep(3)
+            time.sleep(15)
+        
+        print("[STEP 2] 브레이크 해제")
+        robot_send.robot_brake_release()
+        print(">>> 브레이크 해제 대기 (10초)...")
+        time.sleep(10)
 
-        print("\n✅ 로봇 제어 준비 완료!")
-
-        # ------------------------------------------------------------
-        # ★ [핵심 1] '명령 기준점' 변수 생성
-        # 처음엔 현재 위치를 기준으로 잡지만, 움직이기 시작하면 이 변수만 믿고 갑니다.
-        # ------------------------------------------------------------
+        # 초기 기준점 잡기
         while current_real_pose is None:
              time.sleep(0.1)
-        
         last_commanded_pose = list(current_real_pose)
-        print(f"📍 시작 기준점 설정 완료: {last_commanded_pose}")
+        last_input_time = time.time()
+        
+        HOME_JOINTS = [0.0, -1.5708, 1.5708, 0.0, 1.5708, 0.0]
 
+        print("\n✅ 로봇 제어 준비 완료!")
         while True:
-            key = input("명령 (w/s/a/d/q/e) >> ").strip().lower()
+            print("\n" + "-"*40)
+            print(" w/s/a/d/q/e : XYZ 이동 (5cm)")
+            print(" m           : 수동 제어 (5초간 힘 풀기)")
+            print(" h           : HOME 복귀")
+            print(" z           : 종료")
+            print("-"*40)
+            
+            if current_real_pose:
+                print(f"📍 현재위치: {['%.2f'%x for x in current_real_pose]}")
+            
+            key = input("명령 >> ").strip().lower()
 
             if key == 'z':
                 break
             
-            # ★ [핵심 2] 현재 로봇 위치(current_real_pose)가 아니라
-            # '내가 마지막으로 명령했던 위치(last_commanded_pose)'를 기준으로 계산합니다.
-            target_pose = list(last_commanded_pose)
-            
-            step = 0.05 # 5cm
+            # --------------------------------------------------------
+            # ✋ [신규 기능] 수동 제어 (Freedrive)
+            # --------------------------------------------------------
+            if key == 'm':
+                print("\n✋ [수동 제어] 로봇의 힘이 풀립니다! (5초)")
+                print("⚠️ 주의: 로봇을 손으로 잡고 계세요!")
+                
+                # 1. 프리드라이브 모드 진입
+                robot_send.send_command("freedrive_mode()")
+                
+                # 2. 카운트다운
+                for i in range(5, 0, -1):
+                    print(f"⏳ {i}초 남음...", end='\r')
+                    time.sleep(1)
+                
+                # 3. 프리드라이브 종료 (다시 고정)
+                print("\n🔒 [수동 제어] 종료! 위치를 고정합니다.")
+                robot_send.send_command("end_freedrive_mode()")
+                
+                # 4. 중요: 손으로 옮긴 위치를 기준점으로 재설정
+                time.sleep(1) # 완전히 멈출 때까지 대기
+                if current_real_pose is not None:
+                    last_commanded_pose = list(current_real_pose)
+                    last_input_time = 0 # 다음 명령 시 즉시 반응하도록 리셋
+                    print("✅ 좌표 동기화 완료")
+                continue
 
-            # 계산
-            if key == 'w':   target_pose[0] += step
-            elif key == 's': target_pose[0] -= step
-            elif key == 'a': target_pose[1] += step
-            elif key == 'd': target_pose[1] -= step
-            elif key == 'q': target_pose[2] += step
-            elif key == 'e': target_pose[2] -= step
-            else: continue
+            # --------------------------------------------------------
+            # 🏠 HOME 기능
+            # --------------------------------------------------------
+            if key == 'h':
+                print("🏠 HOME 위치로 이동합니다...")
+                joint_str = "[" + ", ".join([f"{x:.4f}" for x in HOME_JOINTS]) + "]"
+                cmd = f"movej({joint_str}, a=0.5, v=0.3)"
+                robot_send.send_command(cmd)
+                time.sleep(5)
+                last_input_time = 0 
+                continue
 
-            # 명령 전송
-            pose_str = "[" + ", ".join([f"{x:.4f}" for x in target_pose]) + "]"
-            
-            # 반응 속도를 위해 v(속도)와 a(가속도)를 조금 높입니다.
-            # blend radius(r)을 쓰면 더 부드럽지만, 지금은 정확한 정지가 목표이므로 r은 뺍니다.
-            cmd = f"movel({pose_str}, a=0.8, v=0.3)" 
-            robot_send.send_command(cmd)
-            
-            print(f"🚀 명령: {key.upper()} 5cm (누적 좌표로 이동)")
+            # --------------------------------------------------------
+            # 🎮 좌표 이동
+            # --------------------------------------------------------
+            if key in ['w', 's', 'a', 'd', 'q', 'e']:
+                current_time = time.time()
+                
+                # 연속 입력 체크
+                if current_time - last_input_time > 0.5:
+                    if current_real_pose is not None:
+                        last_commanded_pose = list(current_real_pose)
+                        print("🔄 기준점 동기화")
+                
+                target_pose = list(last_commanded_pose)
+                step = 0.05 
 
-            # ★ [핵심 3] 기준점을 업데이트 (로봇이 아직 도착 안 했어도, 우린 여기로 간다고 믿음)
-            last_commanded_pose = target_pose
-            
-            # 딜레이를 대폭 줄이거나 없앱니다 (연타 가능하게)
-            # time.sleep(0.1) 
+                if key == 'w':   target_pose[0] += step
+                elif key == 's': target_pose[0] -= step
+                elif key == 'a': target_pose[1] += step
+                elif key == 'd': target_pose[1] -= step
+                elif key == 'q': target_pose[2] += step
+                elif key == 'e': target_pose[2] -= step
+
+                pose_str = "[" + ", ".join([f"{x:.4f}" for x in target_pose]) + "]"
+                cmd = f"movel({pose_str}, a=0.8, v=0.3)" 
+                robot_send.send_command(cmd)
+                print(f"🚀 {key.upper()} 이동")
+
+                last_commanded_pose = target_pose
+                last_input_time = current_time
 
     except Exception as e:
         print(f"\n❌ [ERROR] {e}")
